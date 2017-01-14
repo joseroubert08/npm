@@ -1,5 +1,6 @@
 var path = require('path')
 var mkdirp = require('mkdirp')
+var mr = require('npm-registry-mock')
 var osenv = require('osenv')
 var rimraf = require('rimraf')
 var cacheFile = require('npm-cache-filename')
@@ -14,28 +15,26 @@ var CACHE_DIR = path.resolve(PKG_DIR, 'cache')
 var cacheBase = cacheFile(CACHE_DIR)(common.registry + '/-/all')
 var cachePath = path.join(cacheBase, '.cache.json')
 
+var server
+
 test('setup', function (t) {
-  t.pass('all set up')
-  t.done()
+  mr({port: common.port, throwOnUnmatched: true}, function (err, s) {
+    t.ifError(err, 'registry mocked successfully')
+    server = s
+    t.pass('all set up')
+    t.done()
+  })
 })
 
 test('notifies when there are no results', function (t) {
   setup()
-  var now = Date.now()
-  var cacheContents = {
-    '_updated': now,
-    bar: { name: 'bar', version: '1.0.0' },
-    cool: { name: 'cool', version: '1.0.0' },
-    foo: { name: 'foo', version: '2.0.0' },
-    other: { name: 'other', version: '1.0.0' }
-  }
-  var fixture = new Tacks(File(cacheContents))
-  fixture.create(cachePath)
+  server.get('/-/v1/search?text=none&size=20').once().reply(200, {
+    objects: []
+  })
   common.npm([
-    'search', 'nomatcheswhatsoeverfromthis',
+    'search', 'none',
     '--registry', common.registry,
-    '--loglevel', 'error',
-    '--cache', CACHE_DIR
+    '--loglevel', 'error'
   ], {}, function (err, code, stdout, stderr) {
     if (err) throw err
     t.equal(stderr, '', 'no error output')
@@ -47,6 +46,8 @@ test('notifies when there are no results', function (t) {
 
 test('spits out a useful error when no cache nor network', function (t) {
   setup()
+  server.get('/-/v1/search?text=foo&size=20').once().reply(404, {})
+  server.get('/-/all').many().reply(404, {})
   var cacheContents = {}
   var fixture = new Tacks(File(cacheContents))
   fixture.create(cachePath)
@@ -54,6 +55,7 @@ test('spits out a useful error when no cache nor network', function (t) {
     'search', 'foo',
     '--registry', common.registry,
     '--loglevel', 'silly',
+    '--json',
     '--fetch-retry-mintimeout', 0,
     '--fetch-retry-maxtimeout', 0,
     '--cache', CACHE_DIR
@@ -68,16 +70,12 @@ test('spits out a useful error when no cache nor network', function (t) {
 
 test('can switch to JSON mode', function (t) {
   setup()
-  var now = Date.now()
-  var cacheContents = {
-    '_updated': now,
-    bar: { name: 'bar', version: '1.0.0' },
-    cool: { name: 'cool', version: '1.0.0' },
-    foo: { name: 'foo', version: '2.0.0' },
-    other: { name: 'other', version: '1.0.0' }
-  }
-  var fixture = new Tacks(File(cacheContents))
-  fixture.create(cachePath)
+  server.get('/-/v1/search?text=oo&size=20').once().reply(200, {
+    objects: [
+      { package: { name: 'cool', version: '1.0.0' } },
+      { package: { name: 'foo', version: '2.0.0' } }
+    ]
+  })
   common.npm([
     'search', 'oo',
     '--json',
@@ -86,30 +84,23 @@ test('can switch to JSON mode', function (t) {
     '--cache', CACHE_DIR
   ], {}, function (err, code, stdout, stderr) {
     if (err) throw err
-    t.deepEquals(JSON.parse(stdout), [
-      { name: 'cool', version: '1.0.0' },
-      { name: 'foo', version: '2.0.0' }
-    ], 'results returned as valid json')
     t.equal(stderr, '', 'no error output')
     t.equal(code, 0, 'search gives 0 error code even if no matches')
+    t.deepEquals(JSON.parse(stdout), [
+      { name: 'cool', version: '1.0.0', date: null },
+      { name: 'foo', version: '2.0.0', date: null }
+    ], 'results returned as valid json')
     t.done()
   })
 })
 
 test('JSON mode does not notify on empty', function (t) {
   setup()
-  var now = Date.now()
-  var cacheContents = {
-    '_updated': now,
-    bar: { name: 'bar', version: '1.0.0' },
-    cool: { name: 'cool', version: '1.0.0' },
-    foo: { name: 'foo', version: '2.0.0' },
-    other: { name: 'other', version: '1.0.0' }
-  }
-  var fixture = new Tacks(File(cacheContents))
-  fixture.create(cachePath)
+  server.get('/-/v1/search?text=oo&size=20').once().reply(200, {
+    objects: []
+  })
   common.npm([
-    'search', 'nomatcheswhatsoeverfromthis',
+    'search', 'oo',
     '--json',
     '--registry', common.registry,
     '--loglevel', 'error',
@@ -125,16 +116,12 @@ test('JSON mode does not notify on empty', function (t) {
 
 test('can switch to tab separated mode', function (t) {
   setup()
-  var now = Date.now()
-  var cacheContents = {
-    '_updated': now,
-    bar: { name: 'bar', version: '1.0.0' },
-    cool: { name: 'cool', version: '1.0.0' },
-    foo: { name: 'foo', description: 'this\thas\ttabs', version: '2.0.0' },
-    other: { name: 'other', version: '1.0.0' }
-  }
-  var fixture = new Tacks(File(cacheContents))
-  fixture.create(cachePath)
+  server.get('/-/v1/search?text=oo&size=20').once().reply(200, {
+    objects: [
+      { package: { name: 'cool', version: '1.0.0' } },
+      { package: { name: 'foo', description: 'this\thas\ttabs', version: '2.0.0' } }
+    ]
+  })
   common.npm([
     'search', 'oo',
     '--parseable',
@@ -152,18 +139,11 @@ test('can switch to tab separated mode', function (t) {
 
 test('tab mode does not notify on empty', function (t) {
   setup()
-  var now = Date.now()
-  var cacheContents = {
-    '_updated': now,
-    bar: { name: 'bar', version: '1.0.0' },
-    cool: { name: 'cool', version: '1.0.0' },
-    foo: { name: 'foo', version: '2.0.0' },
-    other: { name: 'other', version: '1.0.0' }
-  }
-  var fixture = new Tacks(File(cacheContents))
-  fixture.create(cachePath)
+  server.get('/-/v1/search?text=oo&size=20').once().reply(200, {
+    objects: []
+  })
   common.npm([
-    'search', 'nomatcheswhatsoeverfromthis',
+    'search', 'oo',
     '--parseable',
     '--registry', common.registry,
     '--loglevel', 'error',
@@ -301,9 +281,11 @@ var searches = [
   }
 ]
 
+// These test classic hand-matched searches
 searches.forEach(function (search) {
   test(search.description, function (t) {
     setup()
+    server.get('/-/v1/search?text=' + encodeURI(search.term) + '&size=20').once().reply(404, {})
     var now = Date.now()
     var cacheContents = {
       '_updated': now,
@@ -349,6 +331,7 @@ searches.forEach(function (search) {
 
 test('cleanup', function (t) {
   cleanup()
+  server.close()
   t.end()
 })
 
@@ -358,6 +341,7 @@ function setup () {
 }
 
 function cleanup () {
+  server.done()
   process.chdir(osenv.tmpdir())
   rimraf.sync(PKG_DIR)
 }
